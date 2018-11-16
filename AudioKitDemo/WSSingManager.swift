@@ -32,7 +32,7 @@ class WSSingManager {
     var accPitch: AKPitchShifter?
 
     var singPath: String?
-    var singPlayer: AKPlayer?
+    var singPlayer: WSAKPlayer?
     var singReverb: AKReverb2?
     
     var totalMixer: AKMixer?
@@ -40,14 +40,16 @@ class WSSingManager {
     var micMixer: AKMixer?
     var recorder: AKNodeRecorder?
     var recordReverb: AKReverb2?
-    
+    var micBooster: AKBooster?
     
     //共有的
      //演唱试听时的声音强度
     var singVolume: Double = 1.0 {
         didSet{
             if mode == .record {
-                self.micMixer?.volume = singVolume
+//                if AKSettings.headPhonesPlugged {
+                    self.micMixer?.volume = singVolume
+//                }
             }else{
                 self.singPlayer?.volume = singVolume
             }
@@ -75,6 +77,7 @@ class WSSingManager {
                 self.micMixer?.volume = self.singVolume
             default:
                 self.micMixer?.volume = 0
+                self.micBooster?.gain = 0
             }
         }
     }
@@ -87,26 +90,34 @@ class WSSingManager {
         
         AKSettings.defaultToSpeaker = true
         micMixer = AKMixer(mic)
-        micMixer?.volume = 0
+        micBooster = AKBooster(micMixer)
+        micBooster?.gain = 0
         do {
-            try AKSettings.setSession(category: .playAndRecord, with: .allowBluetoothA2DP)
+            try AKSettings.setSession(category: .playAndRecord, with: [.allowBluetoothA2DP,.defaultToSpeaker,.allowAirPlay,.allowBluetooth])
             recorder = try AKNodeRecorder(node: micMixer)
-            recordReverb = AKReverb2(micMixer) 
+            recordReverb = AKReverb2(micBooster)
         } catch {
             AKLog("Could not set session category.")
         }
         singPath = recorder?.audioFile?.url.path
+        
+        NotificationCenter.default.addObserver(self, selector: #selector(headerPhoneChanged), name: AVAudioSession.routeChangeNotification, object: nil)
+
     }
     
     //MARK: 开始录制
     public func startRecord(at: Double = 0.0){
         guard let `recorder` = recorder, !recorder.isRecording else {return}
         do {
+            stopTryListen()
             try recorder.record()
             accompanyPlayer?.setPosition(at)
             accompanyPlayer?.play()
             loadReverb(reverbType: self.reverbType)
             self.mode = .record
+            if AKSettings.headPhonesPlugged {
+                self.micBooster?.gain = 1
+            }
         }catch{
             AKLog("录音开启出错：\(error)")
         }
@@ -123,7 +134,7 @@ class WSSingManager {
     public func tryListen(at: Double){
         stopRecord()
         guard let file = recorder?.audioFile else { return }
-        singPlayer?.load(audioFile: file)
+        singPlayer?.load(file)
         accompanyPlayer?.play()
         singPlayer?.play()
         self.mode = .tryListen
@@ -188,8 +199,8 @@ class WSSingManager {
             accompanyPlayer = AKPlayer(audioFile: accFile)
             accPitch = AKPitchShifter(accompanyPlayer)
             
-            singPlayer = AKPlayer(audioFile: singFile)
-            singReverb = AKReverb2(singPlayer)
+            singPlayer = WSAKPlayer(audioFile: singFile)
+            singReverb = AKReverb2(singPlayer?.moogLadder)
             totalMixer = AKMixer(recordReverb, accPitch, singReverb)
             AudioKit.output = totalMixer
             try AudioKit.start()
@@ -200,10 +211,67 @@ class WSSingManager {
         
     }
     
+    //MARK: 通知
+    @objc private func headerPhoneChanged(){
+        if AKSettings.headPhonesPlugged {
+            micBooster?.gain = 1
+        }else{
+            micBooster?.gain = 0
+            stopRecord()
+            stopTryListen()
+        }
+    }
+    
 }
 
 enum WSReverbType {
     
     case none
     case KTV(dryWetMix: Double,decayTimeAt0Hz: Double, gain: Double, maxDelayTime: Double,randomizeReflections: Double, minDelayTime: Double, decayTimeAtNyquist: Double)
+}
+
+class WSAKPlayer {
+    
+    var moogLadder: AKMoogLadder?
+    var player: AKPlayer?
+    
+//    共振；共鸣；反响
+    var resonance: Double = 0.0 {
+        didSet{
+            moogLadder?.resonance = resonance
+        }
+    }
+    
+//    截止频率
+    var cutoffFrequency: Double = 0.0 {
+        didSet{
+            moogLadder?.resonance = resonance
+        }
+    }
+    
+    var volume: Double = 1.0 {
+        didSet{
+            player?.volume = volume
+        }
+    }
+    
+    init(audioFile: AKAudioFile) {
+//        super.init()
+        player = AKPlayer(audioFile: audioFile)
+        moogLadder = AKMoogLadder(player)
+    }
+    
+    public func play(at: Double = 0.0){
+        player?.setPosition(at)
+        player?.play()
+    }
+    
+    public func stop(){
+        player?.stop()
+    }
+    
+    public func load(_ audioFile: AVAudioFile) {
+        player?.load(audioFile: audioFile)
+    }
+    
 }
